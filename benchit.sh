@@ -1,7 +1,14 @@
 
 clearCaches () { sudo sh -c "sync; echo 3 > /proc/sys/vm/drop_caches"; }
 
-saveHadoopLogs () { ls -t /usr/local/hadoop/logs/userlogs/| head -n $1 | tail -n 1 | xargs -t -I{} sh -c "cat /usr/local/hadoop/logs/userlogs/{}/*/syslog" | grep -E 'TaskImpl|TaskAttemptImpl'  > $2 ; }
+saveHadoopLogs () { 
+TASKID=$1
+STARTTIME=$2
+OUTPUT=$3
+TEMPFILE="$(mktemp)";
+ls -t /usr/local/hadoop/logs/userlogs/| head -n $TASKID | tail -n 1 | xargs -t -I{} sh -c "cat /usr/local/hadoop/logs/userlogs/{}/*/syslog" | grep -E 'TaskImpl|TaskAttemptImpl'  > $TEMPFILE ; 
+python3 taskDuration.py $TEMPFILE $STARTTIME > $OUTPUT;
+}
 
 LOG_FILENAME=run.log
 NUMBER_RUNS=1
@@ -12,7 +19,7 @@ TOP_INTERVAL=$IOSTAT_INTERVAL
 jobsToRun=()
 OPTIND=1 
 
-while getopts "r:j:i:n:" opt; do
+while getopts "r:j:n:" opt; do
   case $opt in
     r)
       echo "Results folder= $OPTARG" >&2
@@ -21,10 +28,6 @@ while getopts "r:j:i:n:" opt; do
     j)
       echo "New job= $OPTARG" >&2
 			jobsToRun+=("$OPTARG")
-      ;;
-    i)
-      echo "input file= $OPTARG" >&2
-			INPUT_FILE=$OPTARG
       ;;
     n)
       echo "Number of runs= $OPTARG" >&2
@@ -54,12 +57,12 @@ do
 done
 
 # Job execution
-START_TIME=${RESULTS_FOLDER}\starttime_
+START_TIME=${RESULTS_FOLDER}\starttime
 TASK_DURATION=${RESULTS_FOLDER}\tasks_duration_job
 CPU_USAGE=${RESULTS_FOLDER}\cpu
 DISK_USAGE=${RESULTS_FOLDER}\disk
-jobTasksDurationLog=()
-
+SUMMARY=${RESULTS_FOLDER}/summary
+TEMP_FOLDER=/tmp/tempfolder/
 
 set -x
 
@@ -67,27 +70,40 @@ jobPids=()
 for i in $(seq "$NUMBER_RUNS")
 do
 	echo $i
-	#Create tasks duration files for each job
+	jobTasksDurationLog=()
+	jobTempFolder=()
+	#Create tasks duration files for each job and temp result files
 	for j in $(seq "${#jobsToRun[@]}")
 	do
-		echo "allo"
+		echo $j
 		jobTasksDurationLog[$j]=${TASK_DURATION}$i\-$j.log
-		echo ${jobTasksDurationLog[$j]}
+		jobTempFolder[$j]=${TEMP_FOLDER}$j
+		echo ${jobTempFolder[$j]}
 	done
 
 	#Create CPU and DISK files
 	CURR_START_TIME=${START_TIME}\-$i.csv
 	CURR_DISK_USAGE=${DISK_USAGE}\-$i.csv
 	CURR_CPU_USAGE=${CPU_USAGE}\-$i.csv
+	CURR_SUMMARY=${SUMMARY}\-$i.csv
 	echo $CURR_DISK_USAGE
 	echo $CURR_CPU_USAGE
+	
+	clearCaches
 
+	jobId=1
+	echo "Launching jobs"
 	for j in "${jobsToRun[@]}"
 	do
 		echo $j
-		clearCaches
-		sh -c "$j" &
+		CMD=$j
+		CMD+=" "
+		CMD+=${jobTempFolder[$jobId]}
+		sh -c "$CMD" &
 		jobPids+=($!)
+		echo "${jobTempFolder[$jobId]}"
+		((jobId++))
+		echo $jobId
 	done
 
 	echo "cpu" > $CURR_CPU_USAGE
@@ -111,7 +127,9 @@ do
 
 	for j in $(seq "${#jobsToRun[@]}")
 	do
-		#saveHadoopLogs $j ${jobTasksDurationLog[$j]}
+		saveHadoopLogs $j $CURR_START_TIME ${jobTasksDurationLog[$j]}
 		echo $j
+		hdfs dfs -rm -r -skipTrash ${jobTempFolder[$j]}
 	done
+	paste -d',' $CURR_CPU_USAGE $CURR_DISK_USAGE > $CURR_SUMMARY
 done
